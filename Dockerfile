@@ -13,11 +13,12 @@ RUN apt update -y \
         python3 \
         python-is-python3\
         python3-pip\
+        ffmpeg\
     && apt autoremove -y \
     && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install openai scipy
+RUN pip install openai scipy pydub
 
 COPY Audio.py /Audio.py
 COPY naoqi_start.bash /naoqi_start.bash
