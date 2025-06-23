@@ -11,8 +11,9 @@ import os
 import time
 from scipy.io import wavfile
 import math
+from openai import OpenAI
 
-TOPIC_NAME = "/audio"
+TOPIC_NAME = "/nao_robot/microphone/naoqi_microphone/audio_raw"
 '''
 # timestanp the audio buffer
 std_msgs/Header header
@@ -39,10 +40,11 @@ int16[] data
 class NaoAudioStreamer(Node):
     """
     ROS2 Audio class for subscribing to NAO robot audio and providing streaming functionality
-    for Speech-to-Text services. Supports both real-time streaming and file-based recording.
+    for Speech-to-Text services. Supports both real-time streaming and file-based recording
+    with OpenAI transcription integration.
     """
     
-    def __init__(self, node_name: str = 'nao_audio_streamer'):
+    def __init__(self, node_name: str = 'nao_audio_streamer', enable_openai: bool = True):
         super().__init__(node_name)
         
         # Audio properties
@@ -62,6 +64,20 @@ class NaoAudioStreamer(Node):
         self.max_file_size_mb = 20  # Stay under 25MB limit with some margin
         self.temp_files: List[str] = []  # Track temporary files for cleanup
         self.recording_lock = threading.Lock()
+        
+        # OpenAI STT integration
+        self.enable_openai = enable_openai
+        self.openai_client = None
+        self.auto_transcribe = False
+        self.transcription_model = "gpt-4o-mini-transcribe"  # Default OpenAI model
+        
+        if self.enable_openai:
+            try:
+                self.openai_client = OpenAI()
+                self.get_logger().info("OpenAI client initialized successfully")
+            except Exception as e:
+                self.get_logger().error(f"Failed to initialize OpenAI client: {str(e)}")
+                self.enable_openai = False
         
         # Create subscription to audio topic
         self.audio_subscription = self.create_subscription(
@@ -124,7 +140,10 @@ class NaoAudioStreamer(Node):
                     # Check if we need to save due to size limit
                     current_size = self._estimate_buffer_size_mb()
                     if current_size >= self.max_file_size_mb:
-                        self._save_current_buffer()
+                        saved_file = self._save_current_buffer()
+                        # Auto-transcribe if enabled
+                        if self.auto_transcribe and saved_file:
+                            self._transcribe_and_print(saved_file)
             
         except Exception as e:
             self.get_logger().error(f"Error processing audio data: {str(e)}")
@@ -170,25 +189,28 @@ class NaoAudioStreamer(Node):
         
         self.get_logger().info("Audio streaming stopped")
     
-    def start_recording(self, max_file_size_mb: float = 20):
+    def start_recording(self, max_file_size_mb: float = 20, auto_transcribe: bool = True):
         """
         Start recording audio to files for STT service upload.
         
         Args:
             max_file_size_mb: Maximum file size in MB (default 20MB to stay under 25MB limit)
+            auto_transcribe: Whether to automatically transcribe saved audio segments
         """
         if self.is_recording:
             self.get_logger().warn("Audio recording is already active")
             return
         
         self.max_file_size_mb = max_file_size_mb
+        self.auto_transcribe = auto_transcribe and self.enable_openai
         self.is_recording = True
         self.recording_start_time = time.time()
         
         with self.recording_lock:
             self.recording_buffer.clear()
         
-        self.get_logger().info(f"Audio recording started (max file size: {max_file_size_mb}MB)")
+        transcribe_msg = " with auto-transcription" if self.auto_transcribe else ""
+        self.get_logger().info(f"Audio recording started (max file size: {max_file_size_mb}MB){transcribe_msg}")
     
     def stop_recording(self, save_final_segment: bool = True) -> Optional[str]:
         """
@@ -211,16 +233,21 @@ class NaoAudioStreamer(Node):
             with self.recording_lock:
                 if self.recording_buffer:
                     final_file = self._save_current_buffer()
+                    # Auto-transcribe final segment if enabled
+                    if self.auto_transcribe and final_file:
+                        self._transcribe_and_print(final_file)
         
+        self.auto_transcribe = False
         self.get_logger().info("Audio recording stopped")
         return final_file
     
-    def save_audio_segment(self, duration_seconds: Optional[float] = None) -> Optional[str]:
+    def save_audio_segment(self, duration_seconds: Optional[float] = None, transcribe: bool = None) -> Optional[str]:
         """
         Manually save current audio buffer to a file.
         
         Args:
             duration_seconds: If specified, save only the last N seconds of audio
+            transcribe: Whether to transcribe this segment (uses auto_transcribe setting if None)
             
         Returns:
             Path to the saved file, or None if no audio to save
@@ -256,10 +283,73 @@ class NaoAudioStreamer(Node):
             # Save and clear the specified portion
             if duration_seconds:
                 # Don't clear buffer for manual saves
-                return self._save_buffer_to_file(buffer_to_save)
+                saved_file = self._save_buffer_to_file(buffer_to_save)
             else:
                 # Clear buffer for full saves
-                return self._save_current_buffer()
+                saved_file = self._save_current_buffer()
+            
+            # Transcribe if requested
+            should_transcribe = transcribe if transcribe is not None else self.auto_transcribe
+            if should_transcribe and saved_file:
+                self._transcribe_and_print(saved_file)
+            
+            return saved_file
+    
+    def transcribe_file(self, file_path: str, model: str = None) -> Optional[str]:
+        """
+        Transcribe an audio file using OpenAI's API.
+        
+        Args:
+            file_path: Path to the audio file
+            model: OpenAI model to use (defaults to self.transcription_model)
+            
+        Returns:
+            Transcribed text, or None if transcription failed
+        """
+        if not self.enable_openai or not self.openai_client:
+            self.get_logger().error("OpenAI client not available for transcription")
+            return None
+        
+        if not os.path.exists(file_path):
+            self.get_logger().error(f"Audio file not found: {file_path}")
+            return None
+        
+        try:
+            model = model or self.transcription_model
+            
+            with open(file_path, "rb") as audio_file:
+                transcription = self.openai_client.audio.transcriptions.create(
+                    model=model,
+                    file=audio_file
+                )
+            
+            return transcription.text
+            
+        except Exception as e:
+            self.get_logger().error(f"OpenAI transcription failed: {str(e)}")
+            return None
+    
+    def _transcribe_and_print(self, file_path: str):
+        """
+        Transcribe an audio file and print the result.
+        
+        Args:
+            file_path: Path to the audio file to transcribe
+        """
+        def transcribe_worker():
+            try:
+                transcription = self.transcribe_file(file_path)
+                if transcription:
+                    print(f"\n🎙️  USER SPEECH: {transcription}\n")
+                    self.get_logger().info(f"Transcribed: {transcription}")
+                else:
+                    self.get_logger().warn("Transcription returned empty result")
+            except Exception as e:
+                self.get_logger().error(f"Error in transcription worker: {str(e)}")
+        
+        # Run transcription in a separate thread to avoid blocking
+        transcription_thread = threading.Thread(target=transcribe_worker, daemon=True)
+        transcription_thread.start()
     
     def get_recorded_files(self) -> List[str]:
         """
@@ -285,6 +375,16 @@ class NaoAudioStreamer(Node):
         
         self.temp_files.clear()
         self.get_logger().info(f"Cleaned up {deleted_count} temporary audio files")
+    
+    def set_transcription_model(self, model: str):
+        """
+        Set the OpenAI transcription model to use.
+        
+        Args:
+            model: Model name (e.g., 'whisper-1')
+        """
+        self.transcription_model = model
+        self.get_logger().info(f"Transcription model set to: {model}")
     
     def _estimate_buffer_size_mb(self) -> float:
         """
@@ -394,6 +494,9 @@ class NaoAudioStreamer(Node):
             'channels': self.channels,
             'is_streaming': self.is_streaming,
             'is_recording': self.is_recording,
+            'auto_transcribe': self.auto_transcribe,
+            'openai_enabled': self.enable_openai,
+            'transcription_model': self.transcription_model,
             'queue_size': self.audio_queue.qsize(),
             'recording_buffer_size_mb': self._estimate_buffer_size_mb(),
             'recorded_files_count': len(self.temp_files)
@@ -413,23 +516,28 @@ class NaoAudioStreamer(Node):
 
 def main(args=None):
     """
-    Main function to run the audio streamer node.
+    Main function to run the audio streamer node with OpenAI transcription.
     """
     rclpy.init(args=args)
     
-    # Create audio streamer node
-    audio_streamer = NaoAudioStreamer()
+    # Create audio streamer node with OpenAI integration
+    audio_streamer = NaoAudioStreamer(enable_openai=True)
     
     try:
-        # Example usage for STT file recording
-        print("Starting audio recording for STT...")
-        audio_streamer.start_recording(max_file_size_mb=20)
+        print("🎤 Starting NAO Audio Streamer with OpenAI Transcription")
+        print("📝 User speech will be automatically transcribed and displayed")
+        print("⏹️  Press Ctrl+C to stop\n")
+        
+        # Start recording with auto-transcription enabled
+        audio_streamer.start_recording(max_file_size_mb=20, auto_transcribe=True)
         
         # Optional: also start streaming for real-time monitoring
         def audio_monitor(audio_chunk):
             data = audio_chunk['data']
-            freq = audio_chunk['frequency']
-            print(f"Streaming: {len(data)} samples at {freq} Hz")
+            # Show audio activity indicator
+            volume = np.sqrt(np.mean(data**2))
+            if volume > 1000:  # Adjust threshold as needed
+                print("🔊", end="", flush=True)
         
         audio_streamer.start_streaming(audio_monitor)
         
@@ -437,7 +545,7 @@ def main(args=None):
         rclpy.spin(audio_streamer)
         
     except KeyboardInterrupt:
-        audio_streamer.get_logger().info("Shutting down audio streamer...")
+        print("\n\n🛑 Shutting down audio streamer...")
     finally:
         # Clean up
         audio_streamer.stop_streaming()
@@ -445,14 +553,14 @@ def main(args=None):
         
         # Show recorded files
         files = audio_streamer.get_recorded_files()
-        print(f"Recorded {len(files)} audio files:")
+        print(f"\n📁 Recorded {len(files)} audio files:")
         for file_path in files:
             if os.path.exists(file_path):
                 size_mb = os.path.getsize(file_path) / (1024 * 1024)
                 print(f"  {file_path} ({size_mb:.2f}MB)")
         
-        # Cleanup (comment this out if you want to keep the files)
-        # audio_streamer.cleanup_temp_files()
+        # Cleanup temporary files
+        audio_streamer.cleanup_temp_files()
         
         audio_streamer.destroy_node()
         rclpy.shutdown()

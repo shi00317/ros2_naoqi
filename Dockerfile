@@ -17,6 +17,8 @@ RUN apt update -y \
     && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/*
 
+RUN pip install openai scipy
+
 COPY Audio.py /Audio.py
 COPY naoqi_start.bash /naoqi_start.bash
 COPY boot_config.json /opt/ros/${ROS_DISTRO}/share/naoqi_driver/share/boot_config.json
