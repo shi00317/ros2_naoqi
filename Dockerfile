@@ -14,15 +14,20 @@ RUN apt update -y \
         python-is-python3\
         python3-pip\
         ffmpeg\
+        sshpass\
+        openssh-client\
     && apt autoremove -y \
     && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install openai scipy pydub
 
-COPY Audio.py /Audio.py
+COPY scripts /scripts
 COPY naoqi_start.bash /naoqi_start.bash
 COPY boot_config.json /opt/ros/${ROS_DISTRO}/share/naoqi_driver/share/boot_config.json
+
+COPY my_docker_ssh_key /root/.ssh/id_rsa
+RUN chmod 600 /root/.ssh/id_rsa
 
 RUN chmod +x /naoqi_start.bash
 ENTRYPOINT ["/naoqi_start.bash"]
