@@ -10,10 +10,14 @@ RUN apt update -y \
         ros-${ROS_DISTRO}-naoqi-bridge-msgs \
         ros-${ROS_DISTRO}-nao-meshes \
         ros-${ROS_DISTRO}-naoqi-driver \
+        python3 \
+        python-is-python3\
+        python3-pip\
     && apt autoremove -y \
     && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/*
 
+COPY Audio.py /Audio.py
 COPY naoqi_start.bash /naoqi_start.bash
 COPY boot_config.json /opt/ros/${ROS_DISTRO}/share/naoqi_driver/share/boot_config.json
 

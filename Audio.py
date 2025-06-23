@@ -7,7 +7,7 @@ import queue
 import numpy as np
 from typing import Optional, Callable
 
-TOPIC_NAME = "/nao_robot/microphone/naoqi_microphone/audio_raw"
+TOPIC_NAME = "/audio"
 '''
 # timestanp the audio buffer
 std_msgs/Header header
