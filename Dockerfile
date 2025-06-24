@@ -20,7 +20,7 @@ RUN apt update -y \
     && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install openai scipy pydub
+RUN pip install openai scipy pydub langgraph langchain-openai
 
 COPY scripts /scripts
 COPY naoqi_start.bash /naoqi_start.bash
