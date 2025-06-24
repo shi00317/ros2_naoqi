@@ -9,51 +9,27 @@ from typing import Optional, Callable, Dict, List, TypedDict, Any
 from queue import Queue, Empty
 from openai import OpenAI
 from pathlib import Path
-
-# LangGraph imports (install with: pip install langgraph langchain-core)
-try:
-    from langgraph.graph import StateGraph, END
-    from langgraph.graph.state import CompiledStateGraph
-    from langgraph.checkpoint.memory import MemorySaver
-    from langgraph.store.memory import InMemoryStore
-    from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-    LANGGRAPH_AVAILABLE = True
-except ImportError:
-    print("⚠️  LangGraph dependencies not found. Install with: pip install langgraph langchain-core")
-    LANGGRAPH_AVAILABLE = False
-    # Create mock classes for basic functionality
-    class StateGraph:
-        def __init__(self, state_schema): pass
-        def add_node(self, name, func): pass
-        def set_entry_point(self, name): pass
-        def add_edge(self, from_node, to_node): pass
-        def compile(self, checkpointer=None, store=None): return MockCompiledGraph()
-    
-    class MockCompiledGraph:
-        def invoke(self, state, config=None): return state
-        def get_state(self, config): return None
-        def update_state(self, config, values): pass
-    
-    class MemorySaver:
-        def __init__(self): pass
-        
-    class InMemoryStore:
-        def __init__(self): pass
-        def put(self, namespace, key, value): pass
-        def get(self, namespace, key): return None
-        def search(self, namespace, query, limit=10): return []
-    
-    CompiledStateGraph = MockCompiledGraph
-    END = "END"
+from pydantic import BaseModel, Field
+from prompt import AnimationPrompt, AnimationActions
+from animation_executor import NAOAnimationExecutor
+from langgraph.graph import StateGraph, END
+from langgraph.graph.state import CompiledStateGraph
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.store.memory import InMemoryStore
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain.chat_models import init_chat_model
+LANGGRAPH_AVAILABLE = True
 
 
-class ConversationState(TypedDict):
+
+class ConversationState(TypedDict, total=False):
     """State schema for conversation tracking"""
     messages: List[dict]
     user_id: str
     session_id: str
     context: Dict[str, Any]
     last_activity: float
+    _temp_animation_actions: List[str]  # Temporary field for animation actions
 
 
 class PersistentLLMProcessor:
@@ -69,7 +45,8 @@ class PersistentLLMProcessor:
                  system_prompt: Optional[str] = None,
                  max_conversation_length: int = 20,
                  save_directory: str = "/tmp/nao_conversations",
-                 auto_save_delay: float = 10.0):
+                 auto_save_delay: float = 10.0,
+                 nao_ip: str = os.getenv("NAO_IP", "127.0.0.1")):
         """
         Initialize the LLM processor with LangGraph persistence.
         
@@ -81,6 +58,7 @@ class PersistentLLMProcessor:
             max_conversation_length: Maximum number of messages to keep in conversation history
             save_directory: Directory to save conversation states
             auto_save_delay: Seconds of inactivity before auto-saving (default: 10.0)
+            nao_ip: IP address or hostname of the NAO robot for animation execution
         """
         self.model = model
         self.max_queue_size = max_queue_size
@@ -91,12 +69,38 @@ class PersistentLLMProcessor:
         # Create save directory if it doesn't exist
         self.save_directory.mkdir(parents=True, exist_ok=True)
         
-        # Initialize OpenAI client
+        # Initialize OpenAI client (kept for backward compatibility)
         if api_key:
             self.client = OpenAI(api_key=api_key)
         else:
             # Will use OPENAI_API_KEY environment variable
             self.client = OpenAI()
+        
+        # Initialize the two agents using LangChain's init_chat_model
+        if LANGGRAPH_AVAILABLE:
+            try:
+                # RespondAgent - for generating conversational responses
+                self.respond_agent = init_chat_model(self.model, model_provider="openai")
+                
+                # AnimationAgent - for analyzing responses and selecting animations
+                self.animation_agent = init_chat_model(self.model, model_provider="openai")
+                
+                print(f"✅ Initialized RespondAgent and AnimationAgent with model: {self.model}")
+            except Exception as e:
+                print(f"⚠️  Failed to initialize LangChain agents, falling back to OpenAI client: {e}")
+                self.respond_agent = None
+                self.animation_agent = None
+        else:
+            self.respond_agent = None
+            self.animation_agent = None
+        
+        # Initialize NAO animation executor
+        try:
+            self.animation_executor = NAOAnimationExecutor(nao_ip=nao_ip)
+            print(f"🤖 NAO Animation Executor initialized for IP: {nao_ip}")
+        except Exception as e:
+            print(f"⚠️  Failed to initialize NAO Animation Executor: {e}")
+            self.animation_executor = None
         
         # Set system prompt
         self.system_prompt = system_prompt or (
@@ -149,30 +153,51 @@ class PersistentLLMProcessor:
         Returns:
             Compiled state graph for the conversation
         """
-        def process_message(state: ConversationState) -> ConversationState:
-            """Process a message and generate response"""
+        def respond_agent_node(state: ConversationState) -> ConversationState:
+            """RespondAgent: Process a message and generate response using LangChain agent"""
             messages = state["messages"]
             
-            # Build conversation history for OpenAI
-            openai_messages = [{"role": "system", "content": self.system_prompt}]
-            
-            # Add conversation history (limit to max_conversation_length)
-            for msg in messages[-(self.max_conversation_length-1):]:  # -1 for system message
-                openai_messages.append({
-                    "role": msg["role"],
-                    "content": msg["content"]
-                })
-            
             try:
-                # Generate response
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=openai_messages,
-                    max_tokens=150,
-                    temperature=0.7
-                )
-                
-                response_text = response.choices[0].message.content.strip()
+                # Use LangChain agent if available, otherwise fall back to OpenAI client
+                if self.respond_agent:
+                    # Build conversation history for LangChain
+                    langchain_messages = [SystemMessage(content=self.system_prompt)]
+                    
+                    # Add conversation history (limit to max_conversation_length)
+                    for msg in messages[-(self.max_conversation_length-1):]:  # -1 for system message
+                        if msg["role"] == "user":
+                            langchain_messages.append(HumanMessage(content=msg["content"]))
+                        elif msg["role"] == "assistant":
+                            langchain_messages.append(AIMessage(content=msg["content"]))
+                    
+                    # Generate response using LangChain agent
+                    response = self.respond_agent.invoke(langchain_messages)
+                    response_text = response.content.strip()
+                    
+                else:
+                    # Fallback to OpenAI client
+                    openai_messages = [{"role": "system", "content": self.system_prompt}]
+                    
+                    # Add conversation history (limit to max_conversation_length)
+                    for msg in messages[-(self.max_conversation_length-1):]:  # -1 for system message
+                        openai_messages.append({
+                            "role": msg["role"],
+                            "content": msg["content"]
+                        })
+                    
+                    # Generate response
+                    response = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=openai_messages,
+                        max_tokens=150,
+                        temperature=0.7
+                    )
+                    
+                    response_text = response.choices[0].message.content.strip()
+                    
+                    # Update statistics for OpenAI usage
+                    if hasattr(response, 'usage') and response.usage:
+                        self.stats['total_tokens_used'] += response.usage.total_tokens
                 
                 # Add assistant response to conversation
                 messages.append({
@@ -183,8 +208,6 @@ class PersistentLLMProcessor:
                 
                 # Update statistics
                 self.stats['requests_processed'] += 1
-                if hasattr(response, 'usage') and response.usage:
-                    self.stats['total_tokens_used'] += response.usage.total_tokens
                 
                 # Update last activity and mark as needing save
                 current_time = time.time()
@@ -228,11 +251,59 @@ class PersistentLLMProcessor:
                     "last_activity": current_time
                 }
         
-        # Create the graph with persistence
+        def animation_agent_node(state: ConversationState) -> ConversationState:
+            """AnimationAgent: Analyze the assistant's response and select appropriate animation actions using LangChain agent"""
+            messages = state["messages"]
+            animation_actions = []
+            
+            # Get the latest assistant message
+            assistant_messages = [msg for msg in messages if msg["role"] == "assistant"]
+            if assistant_messages:
+                latest_response = assistant_messages[-1]["content"]
+                
+                try:
+                    if self.animation_agent:
+                        # Use LangChain agent with structured output for animation analysis
+                        animation_prompt_text = AnimationPrompt.format(response_text=latest_response)
+                        
+                        # Create structured LLM that returns AnimationActions
+                        structured_animation_agent = self.animation_agent.with_structured_output(AnimationActions)
+                        
+                        # Get structured response
+                        animation_response = structured_animation_agent.invoke([HumanMessage(content=animation_prompt_text)])
+                        
+                        # Extract actions from structured response
+                        animation_actions = animation_response.actions
+                        
+                        # Validate actions against available set
+                        valid_actions = ["affirmative_context", "anterior", "comparison", "confirmation", "disappointment", "diversity", "exclamation", "joy", "people", "self", "user"]
+                        animation_actions = [action for action in animation_actions if action in valid_actions]
+                    
+                    else:
+                        # Fallback when animation agent is not available
+                        print(f"⚠️  Animation agent not available, using default action")
+                        animation_actions = ["confirmation"]  # Default fallback
+                    
+                    print(f"🎭 Animation Analysis for session {session_id}:")
+                    print(f"   Response: '{latest_response[:100]}{'...' if len(latest_response) > 100 else ''}'")
+                    print(f"   Selected actions: {animation_actions}")
+                    
+                except Exception as e:
+                    print(f"⚠️  Animation analysis failed: {e}")
+                    animation_actions = ["confirmation"]  # Default fallback
+            
+            # Store animation actions temporarily for the callback (not in persistent state)
+            state["_temp_animation_actions"] = animation_actions
+            
+            return state
+        
+        # Create the graph with both agents
         workflow = StateGraph(ConversationState)
-        workflow.add_node("process", process_message)
-        workflow.set_entry_point("process")
-        workflow.add_edge("process", END)
+        workflow.add_node("respond_agent", respond_agent_node)
+        workflow.add_node("animation_agent", animation_agent_node)
+        workflow.set_entry_point("respond_agent")
+        workflow.add_edge("respond_agent", "animation_agent")
+        workflow.add_edge("animation_agent", END)
         
         # Compile with checkpointer and memory store
         return workflow.compile(
@@ -499,7 +570,11 @@ class PersistentLLMProcessor:
         self.auto_save_thread = threading.Thread(target=self._auto_save_loop, daemon=True)
         self.auto_save_thread.start()
         
-        print("🚀 Persistent LLM worker threads started with smart auto-save")
+        # Start animation executor worker if available
+        if self.animation_executor:
+            self.animation_executor.start_worker()
+        
+        print("🚀 Persistent LLM worker threads started with smart auto-save and animation execution")
     
     def stop_worker(self):
         """
@@ -512,13 +587,17 @@ class PersistentLLMProcessor:
         for session_id in list(self.conversation_graphs.keys()):
             self.save_conversation_state(session_id)
         
+        # Stop animation executor if available
+        if self.animation_executor:
+            self.animation_executor.stop_worker()
+        
         # Wait for threads to stop
         if self.worker_thread and self.worker_thread.is_alive():
             self.worker_thread.join(timeout=5.0)
         if self.auto_save_thread and self.auto_save_thread.is_alive():
             self.auto_save_thread.join(timeout=5.0)
             
-        print("🛑 Persistent LLM worker threads stopped")
+        print("🛑 Persistent LLM worker threads and animation executor stopped")
     
     def add_request(self, text: str, callback: Optional[Callable[[str], None]] = None, 
                    session_id: str = "default", user_id: str = "default"):
@@ -627,23 +706,43 @@ class PersistentLLMProcessor:
             # Process through LangGraph
             result = graph.invoke(input_state, config)
             
-            # Get the latest assistant response
+            # Get the latest assistant response and animation actions
             assistant_messages = [msg for msg in result["messages"] if msg["role"] == "assistant"]
+            animation_actions = result.get("_temp_animation_actions", [])
+            
             if assistant_messages:
                 response_text = assistant_messages[-1]["content"]
                 print(f"✅ LLM Response (session: {session_id}): '{response_text[:100]}{'...' if len(response_text) > 100 else ''}'")
+                print(f"🎭 Animation Actions: {animation_actions}")
                 
                 # Update last activity (response completed, ready for auto-save scheduling)
                 current_time = time.time()
                 self.last_activity[session_id] = current_time
                 
-                # Call callback if provided
+                # Execute animations on NAO robot if executor is available
+                if self.animation_executor and animation_actions:
+                    self.animation_executor.add_animation_request(
+                        actions=animation_actions,
+                        delay_between=1.5  # 1.5 second delay between animations
+                    )
+                
+                # Call callback if provided - now includes both response and actions
                 if callback:
-                    callback(response_text)
+                    # Create a combined response with animation info
+                    enhanced_response = {
+                        "text": response_text,
+                        "animation_actions": animation_actions,
+                        "session_id": session_id
+                    }
+                    callback(enhanced_response)
             else:
                 print(f"⚠️  No assistant response generated")
                 if callback:
-                    callback("I'm sorry, I couldn't generate a response.")
+                    callback({
+                        "text": "I'm sorry, I couldn't generate a response.",
+                        "animation_actions": [],
+                        "session_id": session_id
+                    })
             
         except Exception as e:
             self.stats['requests_failed'] += 1
@@ -652,7 +751,11 @@ class PersistentLLMProcessor:
             
             # Call callback with error if provided
             if 'callback' in request and request['callback']:
-                request['callback'](f"Error: {str(e)}")
+                request['callback']({
+                    "text": f"Error: {str(e)}",
+                    "animation_actions": ["sad"],
+                    "session_id": request.get('session_id', 'default')
+                })
     
     def get_conversation_history(self, session_id: str = "default") -> List[dict]:
         """
@@ -680,6 +783,8 @@ class PersistentLLMProcessor:
             print(f"⚠️  Error getting conversation history: {e}")
         
         return []
+    
+
     
     def clear_conversation(self, session_id: str = "default"):
         """
@@ -774,7 +879,7 @@ class PersistentLLMProcessor:
         Returns:
             Dictionary with statistics
         """
-        return {
+        stats = {
             'enabled': self.is_enabled,
             'model': self.model,
             'queue_size': self.get_queue_size(),
@@ -789,6 +894,44 @@ class PersistentLLMProcessor:
             'save_directory': str(self.save_directory),
             'auto_save_delay': self.auto_save_delay
         }
+        
+        # Add animation executor stats if available
+        if self.animation_executor:
+            stats.update({
+                'animation_executor_enabled': True,
+                'animation_queue_size': self.animation_executor.get_queue_size(),
+                'animation_executor_busy': self.animation_executor.is_busy(),
+                'available_animations': self.animation_executor.get_available_actions()
+            })
+        else:
+            stats['animation_executor_enabled'] = False
+            
+        return stats
+    
+    def update_nao_ip(self, nao_ip: str):
+        """
+        Update NAO robot IP address for animation execution.
+        
+        Args:
+            nao_ip: New IP address or hostname
+        """
+        if self.animation_executor:
+            self.animation_executor.update_nao_ip(nao_ip)
+        else:
+            print("⚠️  Animation executor not available")
+    
+    def test_nao_connection(self) -> bool:
+        """
+        Test connection to NAO robot.
+        
+        Returns:
+            True if connection successful, False otherwise
+        """
+        if self.animation_executor:
+            return self.animation_executor.test_connection()
+        else:
+            print("⚠️  Animation executor not available")
+            return False
 
 
 # Alias for backward compatibility
@@ -799,8 +942,12 @@ if __name__ == '__main__':
     # Test the persistent LLM processor
     llm = PersistentLLMProcessor(save_directory="/tmp/test_conversations")
     
-    def print_response(response: str):
-        print(f"🗣️  LLM Response: {response}")
+    def print_response(response):
+        if isinstance(response, dict):
+            print(f"🗣️  LLM Response: {response['text']}")
+            print(f"🎭 Animation Actions: {response['animation_actions']}")
+        else:
+            print(f"🗣️  LLM Response: {response}")
     
     llm.start_worker()
     

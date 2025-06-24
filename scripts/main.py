@@ -98,21 +98,30 @@ class NaoAudioSTTSystem:
                 user_id=self.user_id
             )
     
-    def _on_llm_response(self, response: str):
+    def _on_llm_response(self, response):
         """
         Callback function called when LLM processing is complete.
         Prints the LLM response and converts it to speech.
         
         Args:
-            response: The LLM response text
+            response: The LLM response (can be string or dict with text and animation_actions)
         """
         print(f"\n🤖 LLM RESPONSE: {response}")
         print("═" * 60)
         print()
         
+        # Handle both string and dictionary responses
+        if isinstance(response, dict):
+            response_text = response.get('text', '')
+            animation_actions = response.get('animation_actions', [])
+            if animation_actions:
+                print(f"🎭 Animation Actions: {animation_actions}")
+        else:
+            response_text = str(response)
+        
         # Convert LLM response to speech and play on NAO
-        if self.tts.is_enabled and response.strip() and not response.startswith("Error:"):
-            self.tts.add_request(response, self._on_tts_complete, save_file=True)
+        if self.tts.is_enabled and response_text.strip() and not response_text.startswith("Error:"):
+            self.tts.add_request(response_text, self._on_tts_complete, save_file=True)
     
     def _on_tts_complete(self, audio_file_path: str):
         """
