@@ -116,18 +116,14 @@ class NaoAudioSTTSystem:
         if isinstance(response, dict):
             response_text = response.get('text', '')
             animation_actions = response.get('animation_actions', [])
-            skip_tts = response.get('skip_tts', False)
             if animation_actions:
                 print(f"🎭 Animation Actions: {animation_actions}")
-            if skip_tts:
-                print(f"🔇 Skipping TTS for direct animation command: {response_text}")
         else:
             response_text = str(response)
-            skip_tts = False
         
-        # Convert LLM response to speech and play on NAO (unless it's a direct animation command)
+        # Convert LLM response to speech and play on NAO
         if (self.tts.is_enabled and response_text.strip() and 
-            not response_text.startswith("Error:") and not skip_tts):
+            not response_text.startswith("Error:")):
             self.tts.add_request(response_text, self._on_tts_complete, save_file=True)
     
     def _on_tts_complete(self, audio_file_path: str):

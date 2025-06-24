@@ -30,7 +30,6 @@ class ConversationState(TypedDict, total=False):
     context: Dict[str, Any]
     last_activity: float
     _temp_animation_actions: List[str]  # Temporary field for animation actions
-    _skip_tts: bool  # Temporary field to indicate if TTS should be skipped
 
 
 class PersistentLLMProcessor:
@@ -266,6 +265,8 @@ class PersistentLLMProcessor:
             messages = state["messages"]
             animation_actions = []
             
+
+            
             # Get the latest assistant message
             assistant_messages = [msg for msg in messages if msg["role"] == "assistant"]
             if assistant_messages:
@@ -295,11 +296,6 @@ class PersistentLLMProcessor:
                         
                         # Don't generate additional animations for direct commands
                         animation_actions = []
-                        
-                        # Mark this as a direct action so TTS can be skipped
-                        state["_skip_tts"] = True
-                        print(f"🔇 Skipping TTS for direct action: {action_key}")
-                        
                     else:
                         # Normal conversation response - analyze for appropriate animations
                         if self.animation_agent:
@@ -334,10 +330,6 @@ class PersistentLLMProcessor:
             
             # Store animation actions temporarily for the callback (not in persistent state)
             state["_temp_animation_actions"] = animation_actions
-            
-            # Ensure _skip_tts is set if not already (default to False for normal responses)
-            if "_skip_tts" not in state:
-                state["_skip_tts"] = False
             
             return state
         
@@ -772,15 +764,11 @@ class PersistentLLMProcessor:
                 
                 # Call callback if provided - now includes both response and actions
                 if callback:
-                    # Get skip_tts flag from the result
-                    skip_tts = result.get("_skip_tts", False)
-                    
                     # Create a combined response with animation info
                     enhanced_response = {
                         "text": response_text,
                         "animation_actions": animation_actions,
-                        "session_id": session_id,
-                        "skip_tts": skip_tts
+                        "session_id": session_id
                     }
                     callback(enhanced_response)
             else:
@@ -789,8 +777,7 @@ class PersistentLLMProcessor:
                     callback({
                         "text": "I'm sorry, I couldn't generate a response.",
                         "animation_actions": [],
-                        "session_id": session_id,
-                        "skip_tts": False
+                        "session_id": session_id
                     })
             
         except Exception as e:
@@ -803,8 +790,7 @@ class PersistentLLMProcessor:
                 request['callback']({
                     "text": f"Error: {str(e)}",
                     "animation_actions": ["sad"],
-                    "session_id": request.get('session_id', 'default'),
-                    "skip_tts": False
+                    "session_id": request.get('session_id', 'default')
                 })
     
     def get_conversation_history(self, session_id: str = "default") -> List[dict]:

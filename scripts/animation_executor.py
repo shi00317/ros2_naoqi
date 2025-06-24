@@ -32,21 +32,7 @@ class NAOAnimationExecutor:
         self.execution_queue = Queue()
         self.worker_thread = None
         self.is_running = False
-        
-        # Available NAO animations mapping
-        self.animation_mapping = {
-            "affirmative_context": "animations/Stand/Gestures/Yes_1",
-            "anterior": "animations/Stand/Gestures/ShowTablet_1", 
-            "comparison": "animations/Stand/Gestures/Explain_1",
-            "confirmation": "animations/Stand/Gestures/Yes_1",
-            "disappointment": "animations/Stand/Emotions/Negative/Sad_1",
-            "diversity": "animations/Stand/Gestures/ShowSky_1",
-            "exclamation": "animations/Stand/Emotions/Positive/Excited_1",
-            "joy": "animations/Stand/Emotions/Positive/Happy_1",
-            "people": "animations/Stand/Gestures/Hey_1",
-            "self": "animations/Stand/Gestures/Me_1", 
-            "user": "animations/Stand/Gestures/You_1"
-        }
+    
         
         print(f"🤖 NAO Animation Executor initialized for {username}@{nao_ip}")
     
@@ -87,7 +73,7 @@ class NAOAnimationExecutor:
             print(f"❌ SSH connection error: {e}")
             return False
     
-    def execute_single_animation(self, action: str, animation_path: Optional[str] = None) -> bool:
+    def execute_single_animation(self, action: str,) -> bool:
         """
         Execute a single animation on NAO robot.
         
@@ -101,24 +87,20 @@ class NAOAnimationExecutor:
         
         try:
             # Determine the command to use
-            if animation_path:
-                # Use specific animation path with ALAnimationPlayer.run
-                qicli_command = f"qicli call ALAnimationPlayer.run {animation_path}"
-                print(f"🎭 Executing animation: {action} -> {animation_path}")
-            elif action.startswith("animations/"):
+            if action.startswith("animations/"):
                 # Direct animation path provided as action
                 qicli_command = f"qicli call ALAnimationPlayer.run {action}"
                 print(f"🎭 Executing animation path: {action}")
+            elif action=="animation_SitDown":
+                qicli_command = f"qicli call ALRobotPosture.goToPosture Crouch 0.5"
+                print(f"🎭 Executing animation path: {action}")
+            elif action=="animation_StandUp":
+                qicli_command = f"qicli call ALRobotPosture.goToPosture Stand 0.5"
+                print(f"🎭 Executing animation path: {action}")
             else:
-                # Use tag-based execution for mapped actions
-                mapped_path = self.animation_mapping.get(action)
-                if mapped_path:
-                    qicli_command = f"qicli call ALAnimationPlayer.run {mapped_path}"
-                    print(f"🎭 Executing animation: {action} -> {mapped_path}")
-                else:
-                    # Try as tag if no mapping found
-                    qicli_command = f"qicli call ALAnimationPlayer.runTag {action}"
-                    print(f"🎭 Executing animation tag: {action}")
+                # Try as tag if no mapping found
+                qicli_command = f"qicli call ALAnimationPlayer.runTag {action}"
+                print(f"🎭 Executing animation tag: {action}")
             
             # Build SSH command to execute qicli animation
             ssh_cmd = [
@@ -150,19 +132,6 @@ class NAOAnimationExecutor:
         except Exception as e:
             print(f"❌ Animation '{action}' error: {e}")
             return False
-    
-    def execute_direct_animation(self, action_key: str, animation_path: str) -> bool:
-        """
-        Execute a specific animation directly by its path.
-        
-        Args:
-            action_key: The action key (for logging)
-            animation_path: Direct path to the animation
-            
-        Returns:
-            True if animation executed successfully, False otherwise
-        """
-        return self.execute_single_animation(action_key, animation_path)
     
     def execute_animation_sequence(self, actions: List[str], delay_between: float = 1.0) -> bool:
         """
@@ -296,15 +265,6 @@ class NAOAnimationExecutor:
         """
         return self.execution_queue.qsize()
     
-    def get_available_actions(self) -> List[str]:
-        """
-        Get list of available animation actions.
-        
-        Returns:
-            List of available animation action names
-        """
-        return list(self.animation_mapping.keys())
-    
     def update_nao_ip(self, new_ip: str):
         """
         Update NAO robot IP address.
@@ -348,4 +308,3 @@ if __name__ == '__main__':
     else:
         print("❌ Cannot connect to NAO robot, skipping animation tests")
         
-    print(f"📊 Available actions: {executor.get_available_actions()}") 
