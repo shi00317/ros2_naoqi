@@ -38,6 +38,8 @@ class NaoAudioSTTSystem:
         # Initialize LLM processor with conversation state management and persistence
         self.llm = PersistentLLMProcessor(
             model="gpt-4o-mini",
+            respond_model = "gpt-4.1-2025-04-14",
+            animation_model = "gpt-4.1-mini-2025-04-14",
             max_queue_size=10,
             max_conversation_length=20,  # Keep last 20 messages for context
             system_prompt="You are a helpful assistant for a NAO robot. Respond to user speech in a natural, friendly, and concise manner. Keep responses brief but informative. Remember our conversation context and refer to previous messages when relevant.",
@@ -114,13 +116,18 @@ class NaoAudioSTTSystem:
         if isinstance(response, dict):
             response_text = response.get('text', '')
             animation_actions = response.get('animation_actions', [])
+            skip_tts = response.get('skip_tts', False)
             if animation_actions:
                 print(f"🎭 Animation Actions: {animation_actions}")
+            if skip_tts:
+                print(f"🔇 Skipping TTS for direct animation command: {response_text}")
         else:
             response_text = str(response)
+            skip_tts = False
         
-        # Convert LLM response to speech and play on NAO
-        if self.tts.is_enabled and response_text.strip() and not response_text.startswith("Error:"):
+        # Convert LLM response to speech and play on NAO (unless it's a direct animation command)
+        if (self.tts.is_enabled and response_text.strip() and 
+            not response_text.startswith("Error:") and not skip_tts):
             self.tts.add_request(response_text, self._on_tts_complete, save_file=True)
     
     def _on_tts_complete(self, audio_file_path: str):

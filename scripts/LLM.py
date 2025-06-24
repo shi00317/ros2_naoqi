@@ -10,7 +10,7 @@ from queue import Queue, Empty
 from openai import OpenAI
 from pathlib import Path
 from pydantic import BaseModel, Field
-from prompt import AnimationPrompt, AnimationActions
+from prompt import AnimationPrompt, AnimationActions, RespondAgentPrompt, concept_dict
 from animation_executor import NAOAnimationExecutor
 from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph
@@ -30,6 +30,7 @@ class ConversationState(TypedDict, total=False):
     context: Dict[str, Any]
     last_activity: float
     _temp_animation_actions: List[str]  # Temporary field for animation actions
+    _skip_tts: bool  # Temporary field to indicate if TTS should be skipped
 
 
 class PersistentLLMProcessor:
@@ -40,6 +41,8 @@ class PersistentLLMProcessor:
     
     def __init__(self, 
                  model: str = "gpt-4o-mini",
+                 respond_model: Optional[str] = None,
+                 animation_model: Optional[str] = None,
                  api_key: Optional[str] = None,
                  max_queue_size: int = 10,
                  system_prompt: Optional[str] = None,
@@ -51,7 +54,9 @@ class PersistentLLMProcessor:
         Initialize the LLM processor with LangGraph persistence.
         
         Args:
-            model: OpenAI model to use
+            model: Default OpenAI model to use (fallback for both agents)
+            respond_model: Specific model for the respond agent (if None, uses model)
+            animation_model: Specific model for the animation agent (if None, uses model)
             api_key: OpenAI API key (if None, will use OPENAI_API_KEY environment variable)
             max_queue_size: Maximum number of requests to queue
             system_prompt: System prompt to set context for the LLM
@@ -61,6 +66,8 @@ class PersistentLLMProcessor:
             nao_ip: IP address or hostname of the NAO robot for animation execution
         """
         self.model = model
+        self.respond_model = respond_model or model
+        self.animation_model = animation_model or model
         self.max_queue_size = max_queue_size
         self.max_conversation_length = max_conversation_length
         self.save_directory = Path(save_directory)
@@ -76,16 +83,20 @@ class PersistentLLMProcessor:
             # Will use OPENAI_API_KEY environment variable
             self.client = OpenAI()
         
-        # Initialize the two agents using LangChain's init_chat_model
+        # Initialize the two agents using LangChain's init_chat_model with different models
         if LANGGRAPH_AVAILABLE:
             try:
                 # RespondAgent - for generating conversational responses
-                self.respond_agent = init_chat_model(self.model, model_provider="openai")
+                self.respond_agent = init_chat_model(self.respond_model, model_provider="openai")
                 
                 # AnimationAgent - for analyzing responses and selecting animations
-                self.animation_agent = init_chat_model(self.model, model_provider="openai")
+                self.animation_agent = init_chat_model(self.animation_model, model_provider="openai")
                 
-                print(f"✅ Initialized RespondAgent and AnimationAgent with model: {self.model}")
+                if self.respond_model == self.animation_model:
+                    print(f"✅ Initialized RespondAgent and AnimationAgent with model: {self.respond_model}")
+                else:
+                    print(f"✅ Initialized RespondAgent with model: {self.respond_model}")
+                    print(f"✅ Initialized AnimationAgent with model: {self.animation_model}")
             except Exception as e:
                 print(f"⚠️  Failed to initialize LangChain agents, falling back to OpenAI client: {e}")
                 self.respond_agent = None
@@ -102,13 +113,7 @@ class PersistentLLMProcessor:
             print(f"⚠️  Failed to initialize NAO Animation Executor: {e}")
             self.animation_executor = None
         
-        # Set system prompt
-        self.system_prompt = system_prompt or (
-            "You are a helpful assistant for a NAO robot. "
-            "Respond to user inputs in a natural, friendly, and concise manner. "
-            "Keep responses brief but informative. "
-            "Remember the conversation context and refer to previous messages when relevant."
-        )
+        self.system_prompt = RespondAgentPrompt
         
         # Initialize LangGraph persistence components
         self.checkpointer = MemorySaver()
@@ -139,7 +144,12 @@ class PersistentLLMProcessor:
             'conversations_loaded': 0
         }
         
-        print(f"🧠 Persistent LLM Processor initialized with model: {self.model}")
+        if self.respond_model == self.animation_model:
+            print(f"🧠 Persistent LLM Processor initialized with model: {self.respond_model}")
+        else:
+            print(f"🧠 Persistent LLM Processor initialized")
+            print(f"   🗣️  RespondAgent model: {self.respond_model}")
+            print(f"   🎭 AnimationAgent model: {self.animation_model}")
         print(f"💾 Save directory: {self.save_directory}")
         print(f"⏰ Auto-save delay: {self.auto_save_delay}s")
     
@@ -262,27 +272,57 @@ class PersistentLLMProcessor:
                 latest_response = assistant_messages[-1]["content"]
                 
                 try:
-                    if self.animation_agent:
-                        # Use LangChain agent with structured output for animation analysis
-                        animation_prompt_text = AnimationPrompt.format(response_text=latest_response)
+                    # Check if the response is a direct action command
+                    available_action_keys = list(concept_dict.keys())
+                    if latest_response.strip() in available_action_keys:
+                        # This is a direct action command, execute the specific animation
+                        action_key = latest_response.strip()
+                        print(f"🎯 Direct action command detected: {action_key}")
                         
-                        # Create structured LLM that returns AnimationActions
-                        structured_animation_agent = self.animation_agent.with_structured_output(AnimationActions)
+                        # Get random animation from the concept_dict for this action
+                        import random
+                        action_animations = concept_dict[action_key]
+                        selected_animation = random.choice(action_animations)
                         
-                        # Get structured response
-                        animation_response = structured_animation_agent.invoke([HumanMessage(content=animation_prompt_text)])
+                        # Execute the animation directly using animation executor
+                        if self.animation_executor:
+                            # Execute the selected animation path directly
+                            success = self.animation_executor.execute_direct_animation(action_key, selected_animation)
+                            if success:
+                                print(f"🎭 Successfully executed direct action: {action_key} -> {selected_animation}")
+                            else:
+                                print(f"❌ Failed to execute direct action: {action_key} -> {selected_animation}")
                         
-                        # Extract actions from structured response
-                        animation_actions = animation_response.actions
+                        # Don't generate additional animations for direct commands
+                        animation_actions = []
                         
-                        # Validate actions against available set
-                        valid_actions = ["affirmative_context", "anterior", "comparison", "confirmation", "disappointment", "diversity", "exclamation", "joy", "people", "self", "user"]
-                        animation_actions = [action for action in animation_actions if action in valid_actions]
-                    
+                        # Mark this as a direct action so TTS can be skipped
+                        state["_skip_tts"] = True
+                        print(f"🔇 Skipping TTS for direct action: {action_key}")
+                        
                     else:
-                        # Fallback when animation agent is not available
-                        print(f"⚠️  Animation agent not available, using default action")
-                        animation_actions = ["confirmation"]  # Default fallback
+                        # Normal conversation response - analyze for appropriate animations
+                        if self.animation_agent:
+                            # Use LangChain agent with structured output for animation analysis
+                            animation_prompt_text = AnimationPrompt.format(response_text=latest_response)
+                            
+                            # Create structured LLM that returns AnimationActions
+                            structured_animation_agent = self.animation_agent.with_structured_output(AnimationActions)
+                            
+                            # Get structured response
+                            animation_response = structured_animation_agent.invoke([HumanMessage(content=animation_prompt_text)])
+                            
+                            # Extract actions from structured response
+                            animation_actions = animation_response.actions
+                            
+                            # Validate actions against available set
+                            valid_actions = ["affirmative_context", "anterior", "comparison", "confirmation", "disappointment", "diversity", "exclamation", "joy", "people", "self", "user"]
+                            animation_actions = [action for action in animation_actions if action in valid_actions]
+                        
+                        else:
+                            # Fallback when animation agent is not available
+                            print(f"⚠️  Animation agent not available, using default action")
+                            animation_actions = ["confirmation"]  # Default fallback
                     
                     print(f"🎭 Animation Analysis for session {session_id}:")
                     print(f"   Response: '{latest_response[:100]}{'...' if len(latest_response) > 100 else ''}'")
@@ -294,6 +334,10 @@ class PersistentLLMProcessor:
             
             # Store animation actions temporarily for the callback (not in persistent state)
             state["_temp_animation_actions"] = animation_actions
+            
+            # Ensure _skip_tts is set if not already (default to False for normal responses)
+            if "_skip_tts" not in state:
+                state["_skip_tts"] = False
             
             return state
         
@@ -723,16 +767,20 @@ class PersistentLLMProcessor:
                 if self.animation_executor and animation_actions:
                     self.animation_executor.add_animation_request(
                         actions=animation_actions,
-                        delay_between=1.5  # 1.5 second delay between animations
+                        delay_between=0.7 # 0.7 second delay between animations
                     )
                 
                 # Call callback if provided - now includes both response and actions
                 if callback:
+                    # Get skip_tts flag from the result
+                    skip_tts = result.get("_skip_tts", False)
+                    
                     # Create a combined response with animation info
                     enhanced_response = {
                         "text": response_text,
                         "animation_actions": animation_actions,
-                        "session_id": session_id
+                        "session_id": session_id,
+                        "skip_tts": skip_tts
                     }
                     callback(enhanced_response)
             else:
@@ -741,7 +789,8 @@ class PersistentLLMProcessor:
                     callback({
                         "text": "I'm sorry, I couldn't generate a response.",
                         "animation_actions": [],
-                        "session_id": session_id
+                        "session_id": session_id,
+                        "skip_tts": False
                     })
             
         except Exception as e:
@@ -754,7 +803,8 @@ class PersistentLLMProcessor:
                 request['callback']({
                     "text": f"Error: {str(e)}",
                     "animation_actions": ["sad"],
-                    "session_id": request.get('session_id', 'default')
+                    "session_id": request.get('session_id', 'default'),
+                    "skip_tts": False
                 })
     
     def get_conversation_history(self, session_id: str = "default") -> List[dict]:
@@ -882,6 +932,8 @@ class PersistentLLMProcessor:
         stats = {
             'enabled': self.is_enabled,
             'model': self.model,
+            'respond_model': self.respond_model,
+            'animation_model': self.animation_model,
             'queue_size': self.get_queue_size(),
             'requests_processed': self.stats['requests_processed'],
             'requests_failed': self.stats['requests_failed'],

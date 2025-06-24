@@ -2,10 +2,10 @@
 
 docker build -t ros2_naoqi .
 
-NAO_IP=169.254.39.170
+NAO_IP=169.254.96.176
 
 # qicli call ALAutonomousLife.setState disabled
 # qicli call ALMotion.wakeUp
 
-docker run -it --rm --net host --name Nao -e NAO_IP=$NAO_IP ros2_naoqi:latest
+docker run -it --rm --net host --name Nao -e NAO_IP=$NAO_IP -e OPENAI_API_KEY=$(cat "$HOME/Documents/key.txt") ros2_naoqi:latest
 

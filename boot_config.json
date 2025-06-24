@@ -50,7 +50,7 @@
     },
     "diag":
     {
-      "enabled"       : false,
+      "enabled"       : true,
       "frequency"     : 1
     },
     "imu_torso":

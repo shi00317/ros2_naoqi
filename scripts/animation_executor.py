@@ -87,29 +87,47 @@ class NAOAnimationExecutor:
             print(f"❌ SSH connection error: {e}")
             return False
     
-    def execute_single_animation(self, action: str) -> bool:
+    def execute_single_animation(self, action: str, animation_path: Optional[str] = None) -> bool:
         """
         Execute a single animation on NAO robot.
         
         Args:
-            action: Animation action name
+            action: Animation action name or direct path
+            animation_path: Optional specific animation path to execute
             
         Returns:
             True if animation executed successfully, False otherwise
         """
-
         
         try:
+            # Determine the command to use
+            if animation_path:
+                # Use specific animation path with ALAnimationPlayer.run
+                qicli_command = f"qicli call ALAnimationPlayer.run {animation_path}"
+                print(f"🎭 Executing animation: {action} -> {animation_path}")
+            elif action.startswith("animations/"):
+                # Direct animation path provided as action
+                qicli_command = f"qicli call ALAnimationPlayer.run {action}"
+                print(f"🎭 Executing animation path: {action}")
+            else:
+                # Use tag-based execution for mapped actions
+                mapped_path = self.animation_mapping.get(action)
+                if mapped_path:
+                    qicli_command = f"qicli call ALAnimationPlayer.run {mapped_path}"
+                    print(f"🎭 Executing animation: {action} -> {mapped_path}")
+                else:
+                    # Try as tag if no mapping found
+                    qicli_command = f"qicli call ALAnimationPlayer.runTag {action}"
+                    print(f"🎭 Executing animation tag: {action}")
+            
             # Build SSH command to execute qicli animation
             ssh_cmd = [
                 "ssh",
                 f"{self.username}@{self.nao_ip}",
                 "-o", "ConnectTimeout=5", 
                 "-o", "StrictHostKeyChecking=no",
-                f"qicli call ALAnimationPlayer.runTag {action}"
+                qicli_command
             ]
-            
-            print(f"🎭 Executing animation: {action}")
             
             # Execute SSH command
             result = subprocess.run(
@@ -132,6 +150,19 @@ class NAOAnimationExecutor:
         except Exception as e:
             print(f"❌ Animation '{action}' error: {e}")
             return False
+    
+    def execute_direct_animation(self, action_key: str, animation_path: str) -> bool:
+        """
+        Execute a specific animation directly by its path.
+        
+        Args:
+            action_key: The action key (for logging)
+            animation_path: Direct path to the animation
+            
+        Returns:
+            True if animation executed successfully, False otherwise
+        """
+        return self.execute_single_animation(action_key, animation_path)
     
     def execute_animation_sequence(self, actions: List[str], delay_between: float = 1.0) -> bool:
         """
