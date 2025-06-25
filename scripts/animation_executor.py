@@ -84,18 +84,19 @@ class NAOAnimationExecutor:
         Returns:
             True if animation executed successfully, False otherwise
         """
-        
+        print("/////////////////////////////////////")
+        print(action)
         try:
             # Determine the command to use
-            if action.startswith("animations/"):
-                # Direct animation path provided as action
-                qicli_command = f"qicli call ALAnimationPlayer.run {action}"
-                print(f"🎭 Executing animation path: {action}")
-            elif action=="animation_SitDown":
+            if action=="Crouch":
                 qicli_command = f"qicli call ALRobotPosture.goToPosture Crouch 0.5"
                 print(f"🎭 Executing animation path: {action}")
-            elif action=="animation_StandUp":
+            elif action=="Stand":
                 qicli_command = f"qicli call ALRobotPosture.goToPosture Stand 0.5"
+                print(f"🎭 Executing animation path: {action}")
+            elif action.startswith("animations/"):
+                # Direct animation path provided as action
+                qicli_command = f"qicli call ALAnimationPlayer.run {action}"
                 print(f"🎭 Executing animation path: {action}")
             else:
                 # Try as tag if no mapping found
@@ -220,6 +221,89 @@ class NAOAnimationExecutor:
         
         print("🔄 NAO Animation worker loop stopped")
     
+    def get_current_posture(self) -> Optional[str]:
+        """
+        Get the current posture of the NAO robot.
+        
+        Returns:
+            Current posture name as string, or None if failed
+        """
+        try:
+            qicli_command = "qicli call ALRobotPosture.getPosture"
+            
+            ssh_cmd = [
+                "ssh",
+                f"{self.username}@{self.nao_ip}",
+                "-o", "ConnectTimeout=5", 
+                "-o", "StrictHostKeyChecking=no",
+                qicli_command
+            ]
+            
+            result = subprocess.run(
+                ssh_cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout
+            )
+            
+            if result.returncode == 0:
+                posture = result.stdout.strip()
+                print(f"📍 Current posture: {posture}")
+                return posture
+            else:
+                print(f"❌ Failed to get current posture: {result.stderr}")
+                return None
+                
+        except subprocess.TimeoutExpired:
+            print(f"⏰ Get posture command timed out")
+            return None
+        except Exception as e:
+            print(f"❌ Get posture error: {e}")
+            return None
+    
+    def restore_posture(self, posture: str, speed: float = 0.5) -> bool:
+        """
+        Restore NAO robot to a specific posture.
+        
+        Args:
+            posture: Target posture name
+            speed: Speed of posture transition (0.0 to 1.0)
+            
+        Returns:
+            True if posture restored successfully, False otherwise
+        """
+        try:
+            qicli_command = f"qicli call ALRobotPosture.goToPosture {posture} {speed}"
+            
+            ssh_cmd = [
+                "ssh",
+                f"{self.username}@{self.nao_ip}",
+                "-o", "ConnectTimeout=5", 
+                "-o", "StrictHostKeyChecking=no",
+                qicli_command
+            ]
+            
+            result = subprocess.run(
+                ssh_cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout
+            )
+            
+            if result.returncode == 0:
+                print(f"🔄 Restored to posture: {posture}")
+                return True
+            else:
+                print(f"❌ Failed to restore posture '{posture}': {result.stderr}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            print(f"⏰ Restore posture command timed out")
+            return False
+        except Exception as e:
+            print(f"❌ Restore posture error: {e}")
+            return False
+
     def _process_request(self, request: dict):
         """
         Process a single animation request.
@@ -227,12 +311,18 @@ class NAOAnimationExecutor:
         Args:
             request: Animation request dictionary
         """
+        original_posture = None
         try:
             actions = request['actions']
             delay_between = request.get('delay_between', 1.0)
             
             print(f"🤖 Processing animation request: {actions}")
             self.is_executing = True
+            
+            # Get current posture before executing animations
+            original_posture = self.get_current_posture()
+            if original_posture is None:
+                print("⚠️  Could not get current posture, proceeding without posture restoration")
             
             # Execute the animation sequence
             success = self.execute_animation_sequence(actions, delay_between)
@@ -245,6 +335,13 @@ class NAOAnimationExecutor:
         except Exception as e:
             print(f"❌ Animation request processing failed: {str(e)}")
         finally:
+            # Restore original posture if we successfully got it
+            if original_posture is not None:
+                print(f"🔄 Restoring original posture: {original_posture}")
+                restore_success = self.restore_posture(original_posture)
+                if not restore_success:
+                    print(f"⚠️  Failed to restore original posture: {original_posture}")
+            
             self.is_executing = False
     
     def is_busy(self) -> bool:
@@ -264,7 +361,44 @@ class NAOAnimationExecutor:
             Number of animation requests in queue
         """
         return self.execution_queue.qsize()
+
+    def execute_direct_animation(self, action_key: str) -> bool:
+        """
+        Execute a specific animation directly by its path.
+        
+        Args:
+            action_key: The action key (for logging)
+            animation_path: Direct path to the animation
+            
+        Returns:
+            True if animation executed successfully, False otherwise
+        """
+        original_posture = None
+        try:
+            # Get current posture before executing animation
+            original_posture = self.get_current_posture()
+            if original_posture is None:
+                print("⚠️  Could not get current posture, proceeding without posture restoration")
+            
+            # Execute the animation
+            success = self.execute_single_animation(action_key)
+            
+            return success
+            
+        except Exception as e:
+            print(f"❌ Direct animation execution failed: {str(e)}")
+            return False
+        finally:
+            # Restore original posture if we successfully got it
+            if original_posture is not None and action_key!="Crouch" and action_key!="Stand":
+                print(f"🔄 Restoring original posture: {original_posture}")
+                restore_success = self.restore_posture(original_posture)
+                if not restore_success:
+                    print(f"⚠️  Failed to restore original posture: {original_posture}")
+            else:
+                print("ℹ️  No posture restoration needed")
     
+
     def update_nao_ip(self, new_ip: str):
         """
         Update NAO robot IP address.

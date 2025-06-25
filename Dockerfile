@@ -29,5 +29,7 @@ COPY boot_config.json /opt/ros/${ROS_DISTRO}/share/naoqi_driver/share/boot_confi
 COPY my_docker_ssh_key /root/.ssh/id_rsa
 RUN chmod 600 /root/.ssh/id_rsa
 
+WORKDIR /scripts
+
 RUN chmod +x /naoqi_start.bash
 ENTRYPOINT ["/naoqi_start.bash"]

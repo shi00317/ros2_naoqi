@@ -125,8 +125,7 @@ class STTTranscriber:
                     file=audio_file,
                     response_format="text",
                     language = "en",
-                    prompt=STTPrompt
-
+                    prompt=STTPrompt,
                 )
             
             result = transcription.strip() if transcription else ""

@@ -265,13 +265,10 @@ class PersistentLLMProcessor:
             messages = state["messages"]
             animation_actions = []
             
-
-            
             # Get the latest assistant message
             assistant_messages = [msg for msg in messages if msg["role"] == "assistant"]
             if assistant_messages:
                 latest_response = assistant_messages[-1]["content"]
-                
                 try:
                     # Check if the response is a direct action command
                     available_action_keys = list(concept_dict.keys())
@@ -288,7 +285,7 @@ class PersistentLLMProcessor:
                         # Execute the animation directly using animation executor
                         if self.animation_executor:
                             # Execute the selected animation path directly
-                            success = self.animation_executor.execute_direct_animation(action_key, selected_animation)
+                            success = self.animation_executor.execute_direct_animation(selected_animation)
                             if success:
                                 print(f"🎭 Successfully executed direct action: {action_key} -> {selected_animation}")
                             else:
@@ -759,7 +756,7 @@ class PersistentLLMProcessor:
                 if self.animation_executor and animation_actions:
                     self.animation_executor.add_animation_request(
                         actions=animation_actions,
-                        delay_between=0.7 # 0.7 second delay between animations
+                        delay_between=0.4 # 0.7 second delay between animations
                     )
                 
                 # Call callback if provided - now includes both response and actions
