@@ -1,4 +1,4 @@
-# Choregraphe simplified export in Python.
+#!/usr/bin/python2
 from naoqi import ALProxy
 import qi
 import argparse

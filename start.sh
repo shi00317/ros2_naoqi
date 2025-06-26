@@ -2,7 +2,7 @@
 
 docker build -t ros2_naoqi .
 
-NAO_IP=169.254.211.244
+NAO_IP=169.254.151.116
 
 # qicli call ALAutonomousLife.setState disabled
 # qicli call ALMotion.wakeUp

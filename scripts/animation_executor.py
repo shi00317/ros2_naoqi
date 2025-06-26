@@ -98,7 +98,7 @@ class NAOAnimationExecutor:
                 qicli_command = f"qicli call ALAudioPlayer.playFile /home/nao/music/SingSongDoRiMe.mp3 1.0 0.0"
                 print(f"🎭 Executing animation path: {action}")
             elif action=="DiscoDance":
-                qicli_command = f"python /home/nao/code/NaoDanceDisco.py "
+                qicli_command = 'bash -l -c "python /home/nao/code/NaoDanceDisco.py"'
                 print(f"🎭 Executing animation path: {action}")
             elif action.startswith("animations/"):
                 # Direct animation path provided as action
