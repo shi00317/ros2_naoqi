@@ -5,7 +5,7 @@ import time
 from typing import List, Optional
 import threading
 from queue import Queue, Empty
-
+from prompt import DiscoNames, DiscoKeys, DiscoTimes 
 
 class NAOAnimationExecutor:
     """
@@ -93,6 +93,12 @@ class NAOAnimationExecutor:
                 print(f"🎭 Executing animation path: {action}")
             elif action=="Stand":
                 qicli_command = f"qicli call ALRobotPosture.goToPosture Stand 0.5"
+                print(f"🎭 Executing animation path: {action}")
+            elif action=="SingSong":
+                qicli_command = f"qicli call ALAudioPlayer.playFile /home/nao/music/SingSongDoRiMe.mp3 1.0 0.0"
+                print(f"🎭 Executing animation path: {action}")
+            elif action=="DiscoDance":
+                qicli_command = f"python /home/nao/code/NaoDanceDisco.py "
                 print(f"🎭 Executing animation path: {action}")
             elif action.startswith("animations/"):
                 # Direct animation path provided as action
